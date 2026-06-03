@@ -1,0 +1,141 @@
+stages:
+  - build
+  - test
+  - sonarqube
+  - pre_merge
+  - merge_to_develop
+  - deploy
+
+# -----------------------------------------------
+# 1. Build - Solo compilación
+# -----------------------------------------------
+build:
+  stage: build
+  variables:
+    GIT_DEPTH: "0"
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .m2/repository/
+  artifacts:
+    paths:
+      - "**/target/classes/"
+    expire_in: 1 day
+  script:
+    - mvn clean compile
+  tags:
+    - java21
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "develop"
+    - if: $CI_COMMIT_BRANCH =~ /^feature\//
+
+# -------------------------
+# 2. Test
+# -------------------------
+test:
+  stage: test
+  script:
+    - mvn test
+  artifacts:
+    paths:
+      - target/site/jacoco/jacoco.xml
+      - target/surefire-reports/
+    expire_in: 1 day
+  tags:
+    - java21
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "develop"
+    - if: $CI_COMMIT_BRANCH =~ /^feature\//
+
+# -----------------------------------------------
+# 3. SonarQube - Análisis con cobertura y binarios
+# -----------------------------------------------
+sonarqube_analysis:
+  stage: sonarqube
+  variables:
+    GIT_DEPTH: "0"
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+    SONAR_HOST_URL: http://172.24.11.237:9000
+    PROJECT_NAME: $CI_PROJECT_NAME
+  cache:
+    key: "${CI_JOB_NAME}"
+    paths:
+      - .sonar/cache
+      - .m2/repository/
+    policy: pull
+  script:
+    - echo "🔍 Ejecutando análisis SonarQube para ${PROJECT_NAME}..."
+    - |
+      mvn sonar:sonar \
+        -Dsonar.projectKey=${PROJECT_NAME} \
+        -Dsonar.projectName=${PROJECT_NAME} \
+        -Dsonar.host.url=${SONAR_HOST_URL} \
+        -Dsonar.token=${SONAR_TOKEN} \
+        -Dsonar.coverage.jacoco.xmlReportPaths=**/target/site/jacoco/jacoco.xml
+  tags:
+    - java21
+  needs:
+    - build
+    - test
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "develop"
+    - if: $CI_COMMIT_BRANCH =~ /^feature\//
+
+# -------------------------
+# 4. Pre-merge validation (solo en MR)
+# -------------------------
+pre_merge_validation:
+  stage: pre_merge
+  script:
+    - echo "🔄 Creando rama temporal desde feature hacia develop"
+    - git fetch origin
+    - UNIQUE_BRANCH="temp-validate-${CI_COMMIT_SHORT_SHA}-$(date +%s)"
+    - echo "Rama unica::${UNIQUE_BRANCH}"
+    - git checkout -b ${UNIQUE_BRANCH} origin/${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}
+    - echo "🔀 Simulando merge de develop"
+    - git merge origin/develop --no-ff -m "Temp merge validation"
+    - echo "🔧 Validando código fusionado"
+    - mvn clean compile test verify
+    - echo "✅ Validación exitosa"
+    - git checkout origin/${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}
+    - git branch -D ${UNIQUE_BRANCH} 2>/dev/null || true
+  tags:
+    - java21
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# -------------------------
+# 5. Merge real a develop (solo manual en MR)
+# -------------------------
+merge_to_develop:
+  stage: merge_to_develop
+  script:
+    - echo "✅ Todo validado. Procediendo con merge real a develop"
+    - git config user.email "ci@${CI_PROJECT_NAMESPACE}.com"
+    - git config user.name "GitLab CI"
+    - git fetch origin
+    - git checkout -b develop origin/develop
+    - git merge --no-ff origin/${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME} -m "Merge branch '${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}' into develop [skip ci]"
+    - git push origin develop
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: manual
+  tags:
+    - java21
+
+# -------------------------
+# 6. Deploy (solo en develop)
+# -------------------------
+deploy:
+  stage: deploy
+  script:
+    - mvn deploy
+  tags:
+    - java21
+  rules:
+    - if: $CI_COMMIT_BRANCH == "develop"
+      when: on_success
+
