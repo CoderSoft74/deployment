@@ -1,0 +1,287 @@
+---
+# 1. ConfigMap del provisioner local-path (para que reconozca la ruta /opt/oracle/oradata en kube01)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: local-path-config
+  namespace: local-path-storage
+data:
+  config.json: |
+    {
+      "nodePathMap": [
+        {
+          "node": "DEFAULT_PATH_FOR_NON_LISTED_NODES",
+          "paths": ["/var/lib/rancher/k3s/storage"]
+        },
+        {
+          "node": "kube01",
+          "paths": ["/opt/oracle/oradata"]
+        }
+      ]
+    }
+---
+# 2. StorageClass personalizado para Oracle con ruta /opt/oracle/oradata
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-path-oracle
+provisioner: rancher.io/local-path
+parameters:
+  nodePath: /opt/oracle/oradata
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Retain
+---
+# 3. Namespace para Oracle
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: services-databases
+---
+# 4. ConfigMap con variables de Oracle
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: oracle-config
+  namespace: services-databases
+data:
+  ORACLE_DATABASE: "orabd"
+  APP_USER: "DATYS"
+---
+# 5. Secret con contraseñas de Oracle
+apiVersion: v1
+kind: Secret
+metadata:
+  name: oracle-secret
+  namespace: services-databases
+type: Opaque
+stringData:
+  ORACLE_PASSWORD: "manager"
+  APP_USER_PASSWORD: "DATYS"
+---
+# 6. PersistentVolume manual (para evitar depender del provisioner)
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: oracle-local-pv
+  labels:
+    app: oracle-soberania
+spec:
+  capacity:
+    storage: 50Gi
+  volumeMode: Filesystem
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: local-path-oracle
+  local:
+    path: /opt/oracle/oradata
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - "kube01"
+---
+# 7. PersistentVolumeClaim (se vinculará al PV manual)
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: oracle-data-oracle-soberania-0
+  namespace: services-databases
+  labels:
+    app: oracle-soberania
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path-oracle
+  resources:
+    requests:
+      storage: 50Gi
+  volumeName: oracle-local-pv
+---
+# 8. StatefulSet de Oracle
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: oracle-soberania
+  namespace: services-databases
+  labels:
+    app: oracle-soberania
+    service: databases
+spec:
+  serviceName: oracle-svc
+  replicas: 1
+  selector:
+    matchLabels:
+      app: oracle-soberania
+  template:
+    metadata:
+      labels:
+        app: oracle-soberania
+        service: databases
+    spec:
+      securityContext:
+        fsGroup: 54321
+      
+      nodeSelector:
+        kubernetes.io/hostname: "kube01"
+      
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: In
+                values:
+                - "kube01"
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - oracle-soberania
+              topologyKey: kubernetes.io/hostname
+      
+      initContainers:
+      - name: fix-permissions
+        image: 172.24.7.124:5000/gvenzl/oracle-free:23
+        command:
+        - /bin/sh
+        - -c
+        - |
+          echo "=== Arreglando permisos para Oracle ==="
+          mkdir -p /opt/oracle/oradata/FREE/FREEPDB1
+          mkdir -p /opt/oracle/oradata/FREE/pdbseed
+          chown -R 54321:54321 /opt/oracle/oradata
+          chmod -R 755 /opt/oracle/oradata
+          echo "=== Permisos arreglados ==="
+          ls -la /opt/oracle/oradata/FREE
+        volumeMounts:
+        - name: oracle-data
+          mountPath: /opt/oracle/oradata
+      
+      containers:
+      - name: oracle
+        image: 172.24.7.124:5000/gvenzl/oracle-free:23
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 1521
+          name: oracle
+          protocol: TCP
+        
+        securityContext:
+          runAsUser: 54321
+          runAsGroup: 54321
+        
+        env:
+        - name: ORACLE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: oracle-secret
+              key: ORACLE_PASSWORD
+        - name: ORACLE_DATABASE
+          valueFrom:
+            configMapKeyRef:
+              name: oracle-config
+              key: ORACLE_DATABASE
+        - name: APP_USER
+          valueFrom:
+            configMapKeyRef:
+              name: oracle-config
+              key: APP_USER
+        - name: APP_USER_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: oracle-secret
+              key: APP_USER_PASSWORD
+        
+        - name: ORACLE_CHARACTERSET
+          value: "AL32UTF8"
+        - name: ORACLE_EDITION
+          value: "free"
+        - name: ORACLE_SID
+          value: "FREE"
+        - name: ORACLE_PDB
+          value: "FREEPDB1"
+        - name: ORACLE_DISABLE_ASYNCH_IO
+          value: "true"
+        
+        resources:
+          requests:
+            cpu: "1000m"
+            memory: "2Gi"
+          limits:
+            cpu: "1000m"
+            memory: "4Gi"
+        
+        volumeMounts:
+        - name: oracle-data
+          mountPath: /opt/oracle/oradata
+        
+        livenessProbe:
+          tcpSocket:
+            port: 1521
+          initialDelaySeconds: 600
+          periodSeconds: 120
+          timeoutSeconds: 30
+          failureThreshold: 5
+        readinessProbe:
+          tcpSocket:
+            port: 1521
+          initialDelaySeconds: 300
+          periodSeconds: 60
+          timeoutSeconds: 20
+          failureThreshold: 5
+  
+  volumeClaimTemplates:
+  - metadata:
+      name: oracle-data
+    spec:
+      accessModes:
+        - ReadWriteOnce
+      storageClassName: local-path-oracle
+      resources:
+        requests:
+          storage: 50Gi
+---
+# 9. Servicio interno (Headless)
+apiVersion: v1
+kind: Service
+metadata:
+  name: oracle-svc
+  namespace: services-databases
+  labels:
+    app: oracle-soberania
+spec:
+  type: ClusterIP
+  clusterIP: None
+  selector:
+    app: oracle-soberania
+  ports:
+  - name: oracle
+    port: 1521
+    targetPort: 1521
+---
+# 10. Servicio externo (LoadBalancer)
+apiVersion: v1
+kind: Service
+metadata:
+  name: oracle-loadbalancer
+  namespace: services-databases
+  labels:
+    app: oracle-soberania
+spec:
+  type: LoadBalancer
+  selector:
+    app: oracle-soberania
+  ports:
+  - name: oracle
+    port: 1521
+    targetPort: 1521
