@@ -45,7 +45,7 @@ metadata:
   namespace: services-databases
 data:
   ORACLE_DATABASE: "orabd"
-  APP_USER: "DATYS"
+  APP_USER: "USERS"
 ---
 # 5. Secret con contraseñas de Oracle
 apiVersion: v1
@@ -56,7 +56,7 @@ metadata:
 type: Opaque
 stringData:
   ORACLE_PASSWORD: "manager"
-  APP_USER_PASSWORD: "DATYS"
+  APP_USER_PASSWORD: "USERS"
 ---
 # 6. PersistentVolume manual (para evitar depender del provisioner)
 apiVersion: v1
@@ -151,7 +151,7 @@ spec:
       
       initContainers:
       - name: fix-permissions
-        image: 172.24.7.124:5000/gvenzl/oracle-free:23
+        image: gvenzl/oracle-free:23
         command:
         - /bin/sh
         - -c
@@ -169,7 +169,7 @@ spec:
       
       containers:
       - name: oracle
-        image: 172.24.7.124:5000/gvenzl/oracle-free:23
+        image: gvenzl/oracle-free:23
         imagePullPolicy: IfNotPresent
         ports:
         - containerPort: 1521
