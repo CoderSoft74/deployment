@@ -9,4 +9,4 @@
 - redis
 - mongoDB
 - Oracle
-## Despliegue CI/CD (build, test, sonarqube, deploy)
+
